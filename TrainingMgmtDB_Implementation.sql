@@ -3,6 +3,8 @@
 FILE STRUCTURE:
 	A - Creating database and tables
 	B - Triggers
+	C - Constraints
+	D - Procedures
 
 */
 
@@ -44,8 +46,6 @@ BEGIN
 	)
 END
 
--- add check id participant is >= 12 yo when adding new one
--- add trigger for modified date column
 -- add mail confirmation of joining functionality
 
 
@@ -61,9 +61,6 @@ BEGIN
 	)
 END
 
--- add check if difficulty level is from 1 to 5
--- check constraint for type
--- add trigger for modified date column
 
 
 IF NOT EXISTS(SELECT * FROM dbo.sysobjects WHERE ID = OBJECT_ID(N'dbo.Trainers') AND OBJECTPROPERTY(ID, N'IsTable') = 1)
@@ -81,8 +78,6 @@ BEGIN
 	)
 END
 
--- add check if trainer is >= 18 yo
--- add trigger for modified date column
 -- add mail confirmation of joining functionality
 
 
@@ -97,8 +92,6 @@ BEGIN
 		rowguid			UNIQUEIDENTIFIER DEFAULT NEWID() UNIQUE NOT NULL
 	)
 END
-
--- add type check constraint
 
 
 
@@ -117,9 +110,6 @@ BEGIN
 		rowguid				UNIQUEIDENTIFIER DEFAULT NEWID() UNIQUE NOT NULL
 	)
 END
-
--- add check constraint if available_slots <= capacity
-
 
 
 IF NOT EXISTS (SELECT * FROM dbo.sysobjects WHERE ID = OBJECT_ID(N'dbo.Participant_Trainings') AND OBJECTPROPERTY(ID, N'IsTable') =1)
@@ -165,7 +155,6 @@ BEGIN
 	)
 END
 
--- add trigger validity_date depending on type of membership
 
 
 IF NOT EXISTS (SELECT * FROM dbo.sysobjects WHERE ID = OBJECT_ID(N'Logs') AND OBJECTPROPERTY(ID, N'IsTable') = 1)
@@ -186,7 +175,26 @@ END
 -- B
 /* ************************************************************************************************************************************************************* */
 
--- automated trigger generation for every table in database to update 'modified_date' column
+-- drop triggers if already exist
+DROP TRIGGER IF EXISTS trg_UpdateModifiedDate_Logs;
+DROP TRIGGER IF EXISTS trg_UpdateModifiedDate_Memberships;
+DROP TRIGGER IF EXISTS trg_UpdateModifiedDate_Participant_Trainings;
+DROP TRIGGER IF EXISTS trg_UpdateModifiedDate_Participants;
+DROP TRIGGER IF EXISTS trg_UpdateModifiedDate_Places;
+DROP TRIGGER IF EXISTS trg_UpdateModifiedDate_Plans;
+DROP TRIGGER IF EXISTS trg_UpdateModifiedDate_Reviews;
+DROP TRIGGER IF EXISTS trg_UpdateModifiedDate_Trainers;
+DROP TRIGGER IF EXISTS trg_UpdateModifiedDate_Trainings;
+DROP TRIGGER IF EXISTS trg_Validate_Places;
+DROP TRIGGER IF EXISTS trg_Validate_Plans;
+DROP TRIGGER IF EXISTS trg_Validate_Trainings;
+DROP TRIGGER IF EXISTS trg_Validate_Memberships;
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+-- automated trigger generation for each table in database to update 'modified_date' column
+GO
 DECLARE @SQL NVARCHAR(MAX) = '';
 DECLARE @TableName NVARCHAR(255), @PrimaryKeyColumn NVARCHAR(255);
 
@@ -226,14 +234,173 @@ DEALLOCATE TableCursor;
 PRINT @SQL
 EXEC sp_executesql @SQL;
 
+GO
+-- test on data
+insert into Participants(first_name, last_name, email, phone_number, birth_date) values ('test_name', 'test_surname', '----', '----', '----')
+select * from Participants -- before trigger
+
+update Participants
+set last_name = 'test_surname_updated' where participantID = 1
+
+select * from Participants -- after trigger, modified_date should be updated
+
+GO
+-- additional triggers
+CREATE TRIGGER trg_Validate_Plans
+ON Plans
+AFTER INSERT, UPDATE
+AS
+BEGIN
+    -- check if difficulty_level is between 1 and 5
+    IF EXISTS (
+        SELECT 1
+        FROM inserted
+        WHERE difficulty_level NOT BETWEEN 1 AND 5
+    )
+    BEGIN
+        RAISERROR('Difficulty level must be between 1 and 5.', 16, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
+    END
+
+    -- check if type is one of the allowed options
+    IF EXISTS (
+        SELECT 1
+        FROM inserted
+        WHERE type NOT IN ('Strength', 'Cardio', 'Yoga', 'Pilates', 'HIIT')
+    )
+    BEGIN
+        RAISERROR('Invalid type. Allowed values: Strength, Cardio, Yoga, Pilates, HIIT.', 16, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
+    END
+END;
+GO
+
+
+CREATE TRIGGER trg_Validate_Places
+ON Places
+AFTER INSERT, UPDATE
+AS BEGIN
+	-- check if type is one of the allowed options
+	IF EXISTS (
+		SELECT 1
+		FROM inserted
+		WHERE type NOT IN ('Studio', 'Pool', 'Field', 'Court')
+	)
+	BEGIN
+		RAISERROR('Invalid type. Allowed values: Studio, Pool, Field, Court.', 16, 1);
+		ROLLBACK TRANSACTION;
+		RETURN;
+	END
+END;
+GO
+
+
+CREATE TRIGGER trg_Validate_Trainings
+ON Trainings
+AFTER INSERT, UPDATE
+AS BEGIN
+	IF EXISTS (
+		SELECT 1
+		FROM inserted
+		WHERE available_slots > max_capacity
+	)
+	BEGIN
+		RAISERROR('Available slots cannot exceed training capacity', 16, 1);
+		ROLLBACK TRANSACTION;
+		RETURN;
+	END
+END
+GO
+
+
+
+CREATE TRIGGER trg_Validate_Memberships
+ON Memberships
+INSTEAD OF INSERT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @errorMessage NVARCHAR(255);
+
+    -- insert valid rows with automatic calculation of validity_date
+    INSERT INTO Memberships (
+        participantID, 
+        type, 
+        purchase_date, 
+        validity_date, 
+        price, 
+        modified_date, 
+        rowguid
+    )
+    SELECT 
+        i.participantID,
+        i.type,
+        i.purchase_date,
+        -- calculate validity_date based on type
+        CASE 
+            WHEN i.type = '1 month' THEN DATEADD(MONTH, 1, i.purchase_date)
+            WHEN i.type = '3 months' THEN DATEADD(MONTH, 3, i.purchase_date)
+            WHEN i.type = '6 months' THEN DATEADD(MONTH, 6, i.purchase_date)
+            WHEN i.type = '1 year' THEN DATEADD(YEAR, 1, i.purchase_date)
+            ELSE NULL -- invalid type
+        END,
+        i.price,
+        i.modified_date,
+        i.rowguid
+    FROM inserted i
+    WHERE i.type IN ('1 month', '3 months', '6 months', '1 year');
+
+    IF EXISTS (
+        SELECT 1
+        FROM inserted i
+        WHERE i.type NOT IN ('1 month', '3 months', '6 months', '1 year')
+    )
+    BEGIN
+        SET @errorMessage = 'Invalid membership type! Allowed types: 1 month, 3 months, 6 months, 1 year.';
+
+        RAISERROR(@errorMessage, 16, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
+    END
+END
+GO
+
+
+
+-- check if triggers generated successfully
 SELECT t.name AS Table_Name, tr.name AS Trigger_Name
 FROM sys.tables t
 INNER JOIN sys.triggers tr ON t.object_id = tr.parent_id
-WHERE tr.name LIKE 'trg_UpdateModifiedDate_%';
+WHERE tr.name LIKE 'trg_%';
 
 
-insert into Participants(first_name, last_name, email, phone_number, birth_date) values ('Anhelina', 'Mendohralo', '248659@edu.p.lodz.pl', '579299793', '2004-06-04')
-select * from Participants
+/* ************************************************************************************************************************************************************* */
+-- C
+/* ************************************************************************************************************************************************************* */
 
-update Participants
-set last_name = 'Mend' where participantID = 1
+
+-- drop constraints if already exist
+ALTER TABLE Participants DROP CONSTRAINT CHK_Participants_Age;
+ALTER TABLE Trainers DROP CONSTRAINT CHK_Participants_Age;
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+GO
+ALTER TABLE Participants
+ADD CONSTRAINT CHK_Participants_Age
+CHECK (DATEDIFF(YEAR, birth_date, GETDATE()) >= 12)
+
+-- testing check constraint
+INSERT INTO Participants(first_name, last_name, email, phone_number, birth_date) VALUES ('test_name', 'test_surname', '----', '----', GETDATE())
+
+GO
+
+ALTER TABLE Trainers
+ADD CONSTRAINT CHK_Trainers_Age
+CHECK (DATEDIFF(YEAR, birth_date, GETDATE()) >= 18)
+
+-- testing check constraint
+INSERT INTO Trainers(first_name, last_name, email, phone_number,specialization,  birth_date) VALUES ('test_name', 'test_surname','----', '----', '----', GETDATE())
+GO
