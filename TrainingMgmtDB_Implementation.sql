@@ -5,6 +5,8 @@ FILE STRUCTURE:
 	B - Triggers
 	C - Constraints
 	D - Procedures
+	E - Functions
+	F - Roles and access
 
 */
 
@@ -162,14 +164,12 @@ BEGIN
 	CREATE TABLE Logs(
 		logID				INT PRIMARY KEY IDENTITY(1, 1),
 		userGUID			UNIQUEIDENTIFIER FOREIGN KEY REFERENCES Participants(rowguid) ON UPDATE CASCADE,
-		password			nvarchar(128)	 NOT NULL,
-		salt				nvarchar(128)	 NOT NULL,
+		password			varbinary(64)	 NOT NULL,
+		salt				varbinary(32)	 NOT NULL,
 		modified_date		datetime		 DEFAULT (GETDATE()),
 		rowguid				UNIQUEIDENTIFIER DEFAULT NEWID() UNIQUE NOT NULL
 	)
 END
-
-
 
 /* ************************************************************************************************************************************************************* */
 -- B
@@ -359,7 +359,7 @@ BEGIN
         WHERE i.type NOT IN ('1 month', '3 months', '6 months', '1 year')
     )
     BEGIN
-        SET @errorMessage = 'Invalid membership type! Allowed types: 1 month, 3 months, 6 months, 1 year.';
+        SET @errorMessage = 'Invalid membership type. Allowed types: 1 month, 3 months, 6 months, 1 year.';
 
         RAISERROR(@errorMessage, 16, 1);
         ROLLBACK TRANSACTION;
@@ -384,7 +384,7 @@ WHERE tr.name LIKE 'trg_%';
 
 -- drop constraints if already exist
 ALTER TABLE Participants DROP CONSTRAINT CHK_Participants_Age;
-ALTER TABLE Trainers DROP CONSTRAINT CHK_Participants_Age;
+ALTER TABLE Trainers DROP CONSTRAINT CHK_Trainers_Age;
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 GO
@@ -404,3 +404,106 @@ CHECK (DATEDIFF(YEAR, birth_date, GETDATE()) >= 18)
 -- testing check constraint
 INSERT INTO Trainers(first_name, last_name, email, phone_number,specialization,  birth_date) VALUES ('test_name', 'test_surname','----', '----', '----', GETDATE())
 GO
+
+
+/* ************************************************************************************************************************************************************* */
+-- D
+/* ************************************************************************************************************************************************************* */
+GO
+CREATE OR ALTER PROCEDURE sp_Hash_Password
+	@password nvarchar(50),
+    @hashed_password BINARY(64) OUTPUT,
+    @salt BINARY(32) OUTPUT
+--WITH ENCRYPTION
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET @salt = CRYPT_GEN_RANDOM(32);
+
+    DECLARE @combined NVARCHAR(355); 
+    SET @combined = @password + CONVERT(NVARCHAR(100), @salt, 1);
+
+    SET @hashed_password = HASHBYTES('SHA2_512', @combined);
+END;
+GO
+-- testint the hashing proc
+--DECLARE @hp binary(64)
+--DECLARE @salt binary(32)
+--EXECUTE sp_Hash_Password @hp, @salt
+GO
+
+
+CREATE OR ALTER PROCEDURE sp_Check_User -- checks if user already exists
+	@first_name nvarchar(50),
+	@last_name nvarchar(50),
+	@email nvarchar(50),
+	@result int OUTPUT
+	--WITH ENCRYPTION
+AS
+BEGIN
+	SET NOCOUNT ON
+	IF EXISTS(
+		SELECT * FROM Participants WHERE 
+			@first_name = first_name AND
+			@last_name = last_name AND
+			@email = email
+	)
+	BEGIN
+		SET @result = 1
+		RETURN
+	END
+	ELSE
+	IF EXISTS (
+		SELECT * FROM Trainers WHERE 
+			@first_name = first_name AND
+			@last_name = last_name AND
+			@email = email
+	)
+	BEGIN
+		SET @result = 1
+		RETURN
+	END
+
+	SET @result = 0
+END
+
+
+GO
+CREATE OR ALTER PROCEDURE sp_Register_Participants
+	@first_name nvarchar(50),
+	@last_name nvarchar(50),
+	@email nvarchar(50),
+	@phone_number nvarchar(15),
+	@birth_date date,
+	@password nvarchar(50),
+	@result int OUTPUT
+AS
+BEGIN
+	DECLARE @user_exists TINYINT
+	EXEC sp_Check_User @first_name, @last_name, @email, @user_exists
+	IF @user_exists = 1
+	BEGIN
+		SET @result = 1; -- user already exists
+		RETURN
+	END
+
+	-- password hashing
+	DECLARE @hashed_password binary(64)
+	DECLARE @salt binary(32)
+
+	EXEC sp_Hash_Password @password, @hashed_password OUTPUT, @salt OUTPUT
+	INSERT INTO Participants(first_name, last_name, email, phone_number, birth_date) 
+		VALUES (@first_name, @last_name, @email, @phone_number, @birth_date)
+
+	DECLARE @userGUID UNIQUEIDENTIFIER
+	SET @userGUID = (SELECT rowguid FROM Participants WHERE 
+		first_name = @first_name AND
+		last_name = @last_name AND 
+		email = @email)
+
+	INSERT INTO Logs(userGUID, password, salt) VALUES(@userGUID, @hashed_password, @salt)
+	SET @result = 0
+END
+GO
+
+
