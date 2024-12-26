@@ -4,17 +4,18 @@ FILE STRUCTURE:
 	A - Creating database and tables
 	B - Triggers
 	C - Constraints
-	D - Procedures
+	D - Types
 	E - Functions
-	F - Roles and access
+	F - Procedures
+	G - Roles and access
+	
 
 */
 
 
 /* ************************************************************************************************************************************************************* */
--- A 
+-- A - create database and its structure
 /* ************************************************************************************************************************************************************* */
--- create database and its structure
 
 
 -- create database
@@ -151,12 +152,11 @@ BEGIN
 		type				nvarchar(50)				NOT NULL,
 		purchase_date		date DEFAULT (GETDATE())	NOT NULL,
 		validity_date		date						NOT NULL,
-		price				float						NOT NULL,
+		price				smallmoney					NOT NULL,
 		modified_date		datetime		 DEFAULT (GETDATE()),
 		rowguid				UNIQUEIDENTIFIER DEFAULT NEWID() UNIQUE NOT NULL
 	)
 END
-
 
 
 IF NOT EXISTS (SELECT * FROM dbo.sysobjects WHERE ID = OBJECT_ID(N'Logs') AND OBJECTPROPERTY(ID, N'IsTable') = 1)
@@ -171,8 +171,25 @@ BEGIN
 	)
 END
 
+
+
+IF NOT EXISTS (SELECT * FROM dbo.sysobjects WHERE ID = OBJECT_ID(N'AuditLog') AND OBJECTPROPERTY(ID, N'IsTable') = 1)
+BEGIN
+	CREATE TABLE AuditLog (
+    auditID				INT PRIMARY KEY IDENTITY(1,1),
+    tableModified		NVARCHAR(50),
+    actionType			NVARCHAR(20),
+    modifiedBy			UNIQUEIDENTIFIER,
+    modifiedDate		DATETIME DEFAULT GETDATE(),
+    oldValue			NVARCHAR(MAX),
+    newValue			NVARCHAR(MAX),
+	modified_date		datetime		 DEFAULT (GETDATE()),
+	rowguid				UNIQUEIDENTIFIER DEFAULT NEWID() UNIQUE NOT NULL
+);
+END
+
 /* ************************************************************************************************************************************************************* */
--- B
+-- B - triggers
 /* ************************************************************************************************************************************************************* */
 
 -- drop triggers if already exist
@@ -236,11 +253,11 @@ EXEC sp_executesql @SQL;
 
 GO
 -- test on data
-insert into Participants(first_name, last_name, email, phone_number, birth_date) values ('test_name', 'test_surname', '----', '----', '----')
+insert into Participants(first_name, last_name, email, phone_number, birth_date) values ('test_name', 'test_surname', '----', '----', '2000-01-01')
 select * from Participants -- before trigger
 
 update Participants
-set last_name = 'test_surname_updated' where participantID = 1
+set last_name = 'test_surname_updated' where participantID = 2
 
 select * from Participants -- after trigger, modified_date should be updated
 
@@ -378,14 +395,21 @@ WHERE tr.name LIKE 'trg_%';
 
 
 /* ************************************************************************************************************************************************************* */
--- C
+-- C - constraints
 /* ************************************************************************************************************************************************************* */
 
 
 -- drop constraints if already exist
 ALTER TABLE Participants DROP CONSTRAINT CHK_Participants_Age;
 ALTER TABLE Trainers DROP CONSTRAINT CHK_Trainers_Age;
+ALTER TABLE Reviews DROP CONSTRAINT CHK_Rating
+ALTER TABLE Participants DROP CONSTRAINT UQ_Participant_Email
+ALTER TABLE Trainers DROP CONSTRAINT UQ_Trainer_Email
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+ALTER TABLE Reviews ADD CONSTRAINT CHK_Rating CHECK (rating BETWEEN 1 AND 5);
+ALTER TABLE Participants ADD CONSTRAINT UQ_Participant_Email UNIQUE (email);
+ALTER TABLE Trainers ADD CONSTRAINT UQ_Trainer_Email UNIQUE (email);
 
 GO
 ALTER TABLE Participants
@@ -407,14 +431,107 @@ GO
 
 
 /* ************************************************************************************************************************************************************* */
--- D
+-- D - types
+/* ************************************************************************************************************************************************************* */
+GO
+-- custom type for operation results
+IF EXISTS (SELECT * FROM sys.types WHERE name = 'OperationResult')
+    DROP TYPE OperationResult;
+GO
+
+CREATE TYPE OperationResult AS TABLE(
+    ResultCode INT,
+    Severity VARCHAR(20),
+    Message VARCHAR(200)
+);
+GO
+
+/* ************************************************************************************************************************************************************* */
+-- E - functions
+/* ************************************************************************************************************************************************************* */
+
+-- function to standardize operation results
+CREATE OR ALTER FUNCTION fn_GetOperationResult(
+    @procedureName VARCHAR(100),
+    @resultCode INT
+) RETURNS @Result TABLE(
+    ResultCode INT,
+    Severity VARCHAR(20),
+    Message VARCHAR(200)
+)
+AS
+BEGIN
+    INSERT INTO @Result
+    SELECT 
+        @resultCode,
+        CASE 
+            WHEN @resultCode = 0 THEN 'Success'
+            WHEN @resultCode BETWEEN 1 AND 3 THEN 'Warning'
+            ELSE 'Error'
+        END,
+        CASE 
+            -- generic results
+            WHEN @resultCode = 0 THEN 'Operation completed successfully'
+            WHEN @resultCode = 1 AND @procedureName LIKE '%Register%' THEN 'User already exists'
+            WHEN @resultCode = 1 AND @procedureName = 'sp_Add_Participant_To_Training' THEN 'Participant does not exist'
+            
+            -- login specific results
+            WHEN @procedureName = 'sp_Validate_Participant_OnLogIn' THEN
+                CASE @resultCode
+                    WHEN 1 THEN 'User does not exist'
+                    WHEN 2 THEN 'No password set for this user'
+                    WHEN 3 THEN 'Incorrect password'
+                    ELSE 'Unknown login error'
+                END
+
+            -- training registration specific results
+            WHEN @procedureName = 'sp_Add_Participant_To_Training' THEN
+                CASE @resultCode
+                    WHEN 2 THEN 'Training does not exist'
+                    WHEN 3 THEN 'Already registered for this training'
+                    WHEN 4 THEN 'No available slots'
+                    WHEN 5 THEN 'No valid membership for training date'
+                    WHEN 6 THEN 'Transaction error occurred'
+                    ELSE 'Unknown training registration error'
+                END
+
+            -- review specific results
+            WHEN @procedureName = 'sp_Add_Review' THEN
+                CASE @resultCode
+                    WHEN 1 THEN 'Invalid rating value. Must be between 1 and 5'
+                    ELSE 'Unknown review error'
+                END
+
+            -- membership specific results
+            WHEN @procedureName = 'sp_Add_Membership' THEN
+                CASE @resultCode
+                    WHEN 1 THEN 'Invalid membership type'
+                    ELSE 'Unknown membership error'
+                END
+
+            -- plan specific results
+            WHEN @procedureName = 'sp_Add_Plan' THEN
+                CASE @resultCode
+                    WHEN 1 THEN 'Invalid difficulty level. Must be between 1 and 5'
+                    ELSE 'Unknown plan error'
+                END
+
+            -- default case
+            ELSE 'Unspecified error'
+        END;
+
+    RETURN;
+END;
+
+/* ************************************************************************************************************************************************************* */
+-- F - procedures
 /* ************************************************************************************************************************************************************* */
 GO
 CREATE OR ALTER PROCEDURE sp_Hash_Password
 	@password nvarchar(50),
     @hashed_password BINARY(64) OUTPUT,
     @salt BINARY(32) OUTPUT
---WITH ENCRYPTION
+	WITH ENCRYPTION
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -437,8 +554,8 @@ CREATE OR ALTER PROCEDURE sp_Check_User -- checks if user already exists
 	@first_name nvarchar(50),
 	@last_name nvarchar(50),
 	@email nvarchar(50),
-	@result int OUTPUT
-	--WITH ENCRYPTION
+	@result tinyint OUTPUT
+	WITH ENCRYPTION
 AS
 BEGIN
 	SET NOCOUNT ON
@@ -450,6 +567,7 @@ BEGIN
 	)
 	BEGIN
 		SET @result = 1
+		SELECT * FROM fn_GetOperationResult('sp_Check_User', @result);
 		RETURN
 	END
 	ELSE
@@ -461,10 +579,12 @@ BEGIN
 	)
 	BEGIN
 		SET @result = 1
+		SELECT * FROM fn_GetOperationResult('sp_Check_User', @result);
 		RETURN
 	END
 
 	SET @result = 0
+	SELECT * FROM fn_GetOperationResult('sp_Check_User', @result);
 END
 
 
@@ -476,14 +596,17 @@ CREATE OR ALTER PROCEDURE sp_Register_Participants
 	@phone_number nvarchar(15),
 	@birth_date date,
 	@password nvarchar(50),
-	@result int OUTPUT
+	@result tinyint OUTPUT
+	WITH ENCRYPTION
 AS
 BEGIN
+	SET NOCOUNT ON
 	DECLARE @user_exists TINYINT
 	EXEC sp_Check_User @first_name, @last_name, @email, @user_exists
 	IF @user_exists = 1
 	BEGIN
-		SET @result = 1; -- user already exists
+		SET @result = 1; 
+		SELECT * FROM fn_GetOperationResult('sp_Register_Participants', @result);
 		RETURN
 	END
 
@@ -503,7 +626,287 @@ BEGIN
 
 	INSERT INTO Logs(userGUID, password, salt) VALUES(@userGUID, @hashed_password, @salt)
 	SET @result = 0
+	SELECT * FROM fn_GetOperationResult('sp_Register_Participants', @result);
 END
 GO
 
 
+CREATE OR ALTER PROCEDURE sp_Register_Trainers
+	@first_name nvarchar(50),
+	@last_name nvarchar(50),
+	@email nvarchar(50),
+	@phone_number nvarchar(15),
+	@specialization	nvarchar(100),
+	@birth_date date,
+	@password nvarchar(50),
+	@result tinyint OUTPUT
+	WITH ENCRYPTION
+AS
+BEGIN
+	SET NOCOUNT ON
+	DECLARE @user_exists TINYINT
+	EXEC sp_Check_User @first_name, @last_name, @email, @user_exists
+	IF @user_exists = 1
+	BEGIN
+		SET @result = 1; 
+		SELECT * FROM fn_GetOperationResult('sp_Register_Trainers', @result);
+		RETURN
+	END
+
+	-- password hashing
+	DECLARE @hashed_password binary(64)
+	DECLARE @salt binary(32)
+
+	EXEC sp_Hash_Password @password, @hashed_password OUTPUT, @salt OUTPUT
+	INSERT INTO Trainers(first_name, last_name, email, phone_number, specialization, birth_date) 
+		VALUES (@first_name, @last_name, @email, @phone_number, @specialization, @birth_date)
+
+	DECLARE @userGUID UNIQUEIDENTIFIER
+	SET @userGUID = (SELECT rowguid FROM Trainers WHERE 
+		first_name = @first_name AND
+		last_name = @last_name AND 
+		email = @email)
+
+	INSERT INTO Logs(userGUID, password, salt) VALUES(@userGUID, @hashed_password, @salt)
+	SET @result = 0
+	SELECT * FROM fn_GetOperationResult('sp_Register_Trainers', @result);
+END
+
+
+GO
+CREATE OR ALTER PROCEDURE sp_Validate_Participant_OnLogIn
+	@participantID int,
+	@password nvarchar(50),
+	@result tinyint OUTPUT
+	WITH ENCRYPTION
+AS
+BEGIN
+	SET NOCOUNT ON
+
+	DECLARE @first_name varchar(50), @last_name varchar(50), @email varchar(50)
+	DECLARE @userGUID UNIQUEIDENTIFIER
+	SELECT @first_name = first_name, @last_name = last_name, @email = email, @userGUID = rowguid FROM Participants WHERE participantID = @participantID;
+
+	DECLARE @user_exists TINYINT
+	EXEC sp_Check_User @first_name, @last_name, @email, @user_exists
+	IF @user_exists = 0
+	BEGIN
+		SET @result = 1; 
+		SELECT * FROM fn_GetOperationResult('sp_Validate_Participant_OnLogIn', @result);
+		RETURN
+	END
+
+	DECLARE @stored_password varbinary(64)
+	DECLARE @salt varbinary(32)
+
+	SELECT @stored_password = password, @salt = salt FROM Logs
+	WHERE userGUID = @userGUID
+
+	IF @stored_password IS NULL OR @salt IS NULL
+	BEGIN
+		SET @result = 2
+		SELECT * FROM fn_GetOperationResult('sp_Validate_Participant_OnLogIn', @result);
+		RETURN;
+	END
+	-- hash gived password with stored salt and validate
+	DECLARE @combined nvarchar(355), @hashed_password varbinary(64)
+	SET @combined = @password + CONVERT(nvarchar(100), @salt, 1)
+	SET @hashed_password = HASHBYTES('SHA_512', @combined)
+
+	IF @hashed_password = @stored_password
+	BEGIN
+		SET @result = 0
+		SELECT * FROM fn_GetOperationResult('sp_Validate_Participant_OnLogIn', @result);
+		RETURN
+	END
+	SET @result = 3
+	SELECT * FROM fn_GetOperationResult('sp_Validate_Participant_OnLogIn', @result);
+END
+
+
+GO
+CREATE OR ALTER PROCEDURE sp_Add_Review
+	@trainingID int,
+	@participantID int,
+	@rating int,
+	@comment nvarchar(500) = NULL,
+	@result tinyint OUTPUT
+	WITH ENCRYPTION
+AS
+BEGIN
+	SET NOCOUNT ON
+	IF @rating NOT BETWEEN 1 AND 5
+	BEGIN
+		SET @result = 1
+		SELECT * FROM fn_GetOperationResult('sp_Add_Review', @result);
+		RETURN
+	END
+
+	INSERT INTO Reviews(trainingID, participantID, rating, comment)
+				VALUES(@trainingID, @participantID, @rating, @comment)
+	SET @result = 0
+	SELECT * FROM fn_GetOperationResult('sp_Add_Review', @result);
+END
+
+
+GO
+CREATE OR ALTER PROCEDURE sp_Add_Place
+	@name nvarchar(50),
+	@address nvarchar(50),
+	@type nvarchar(50),
+	@result tinyint OUTPUT
+	WITH ENCRYPTION
+AS
+BEGIN
+	SET NOCOUNT ON
+	INSERT INTO Places(name, address, type) VALUES(@name, @address, @type)
+	SET @result = 0
+	SELECT * FROM fn_GetOperationResult('sp_Add_Place', @result);
+END
+
+
+GO
+CREATE OR ALTER PROCEDURE sp_Add_Plan
+	@type nvarchar(50),
+	@difficulty_level int,
+	@description nvarchar(500),
+	@result tinyint OUTPUT
+	WITH ENCRYPTION
+AS
+BEGIN
+	SET NOCOUNT ON
+	IF @difficulty_level NOT BETWEEN 1 AND 5
+	BEGIN
+		SET @result = 1
+		SELECT * FROM fn_GetOperationResult('sp_Add_Plan', @result);
+		RETURN
+	END
+
+	INSERT INTO Plans(type, difficulty_level, description) VALUES(@type, @difficulty_level, @description)
+	SET @result = 0
+	SELECT * FROM fn_GetOperationResult('sp_Add_Plan', @result);
+END
+
+
+GO
+CREATE OR ALTER PROCEDURE sp_Add_Membership
+	@participantID int,
+	@type nvarchar(50),
+	@purchase_date date,
+	@price smallmoney,
+	@result tinyint
+	WITH ENCRYPTION
+AS
+BEGIN
+	SET NOCOUNT ON
+	-- depending on type of membership it may have different validity date
+	DECLARE @validity_date date
+	IF @type = '1 month'
+		SET @validity_date = DATEADD(m, 1, GETDATE())
+	ELSE IF @type = '3 months'
+		SET @validity_date = DATEADD(m, 3, GETDATE())
+	ELSE IF @type = '6 months'
+		SET @validity_date = DATEADD(m, 6, GETDATE())
+	ELSE IF @type = '1 year'
+		SET @validity_date = DATEADD(y, 1, GETDATE())
+	ELSE
+		BEGIN
+			SET @result = 1
+			SELECT * FROM fn_GetOperationResult('sp_Add_Membership', @result);
+			RETURN
+		END
+
+	INSERT INTO Memberships(participantID, type, purchase_date, validity_date, price) 
+		VALUES(@participantID, @type, @purchase_date, @validity_date, @price)
+	SET @result = 0
+	SELECT * FROM fn_GetOperationResult('sp_Add_Membership', @result);
+END
+
+
+GO
+CREATE OR ALTER PROCEDURE sp_Add_Participant_To_Training
+    @participantID int,
+    @trainingID int,
+    @result tinyint OUTPUT
+	WITH ENCRYPTION
+AS
+BEGIN
+    SET NOCOUNT ON;
+    IF NOT EXISTS (SELECT 1 FROM Participants WHERE participantID = @participantID)
+    BEGIN
+        SET @result = 1;
+		SELECT * FROM fn_GetOperationResult('sp_Add_Participant_To_Training', @result);
+        RETURN;
+    END
+
+    IF NOT EXISTS (SELECT 1 FROM Trainings WHERE trainingID = @trainingID)
+    BEGIN
+        SET @result = 2;
+		SELECT * FROM fn_GetOperationResult('sp_Add_Participant_To_Training', @result);
+        RETURN;
+    END
+
+    -- check if participant is already registered for this training
+    IF EXISTS (
+        SELECT 1 
+        FROM Participant_Trainings 
+        WHERE participantID = @participantID 
+        AND trainingID = @trainingID
+    )
+    BEGIN
+        SET @result = 3; 
+		SELECT * FROM fn_GetOperationResult('sp_Add_Participant_To_Training', @result);
+        RETURN;
+    END
+
+    DECLARE @availableSlots tinyint;
+    SELECT @availableSlots = available_slots 
+    FROM Trainings 
+    WHERE trainingID = @trainingID;
+
+    IF @availableSlots <= 0
+    BEGIN
+        SET @result = 4; 
+		SELECT * FROM fn_GetOperationResult('sp_Add_Participant_To_Training', @result);
+        RETURN;
+    END
+
+    -- check if participant has valid membership for training date
+    DECLARE @trainingDate datetime;
+    SELECT @trainingDate = date FROM Trainings WHERE trainingID = @trainingID;
+
+    IF NOT EXISTS (
+        SELECT 1 
+        FROM Memberships 
+        WHERE participantID = @participantID 
+        AND purchase_date <= @trainingDate 
+        AND validity_date >= @trainingDate
+    )
+    BEGIN
+        SET @result = 5; 
+		SELECT * FROM fn_GetOperationResult('sp_Add_Participant_To_Training', @result);
+        RETURN;
+    END
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+            -- add participant to training
+            INSERT INTO Participant_Trainings (trainingID, participantID)
+            VALUES (@trainingID, @participantID);
+
+            -- update available slots
+            UPDATE Trainings
+            SET available_slots = available_slots - 1
+            WHERE trainingID = @trainingID;
+
+        COMMIT TRANSACTION;
+        SET @result = 0; 
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0
+            ROLLBACK TRANSACTION;
+        SET @result = 6; -- unknown error during transaction
+    END CATCH
+	SELECT * FROM fn_GetOperationResult('sp_Add_Participant_To_Training', @result);
+END;
+	
