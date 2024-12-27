@@ -7,7 +7,9 @@ FILE STRUCTURE:
 	D - Types
 	E - Functions
 	F - Procedures
-	G - Roles and access
+	G - Views and indexes
+	H - Roles and access
+	I - Data insert and testing
 	
 
 */
@@ -386,6 +388,117 @@ END
 GO
 
 
+-- Create triggers for key tables
+-- Participants Audit Trigger
+CREATE OR ALTER TRIGGER trg_Audit_Participants
+ON Participants
+AFTER INSERT, UPDATE, DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @result TINYINT;
+
+    -- Handle INSERT
+    IF EXISTS (SELECT * FROM inserted) AND NOT EXISTS (SELECT * FROM deleted)
+    BEGIN
+        INSERT INTO AuditLog (
+            tableModified,
+            actionType,
+            modifiedBy,
+            oldValue,
+            newValue
+        )
+        SELECT 
+            'Participants',
+            'INSERT',
+            i.rowguid,
+            NULL,
+            (SELECT i.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)
+        FROM inserted i;
+    END
+
+    -- Handle UPDATE
+    IF EXISTS (SELECT * FROM inserted) AND EXISTS (SELECT * FROM deleted)
+    BEGIN
+        INSERT INTO AuditLog (
+            tableModified,
+            actionType,
+            modifiedBy,
+            oldValue,
+            newValue
+        )
+        SELECT 
+            'Participants',
+            'UPDATE',
+            i.rowguid,
+            (SELECT d.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),
+            (SELECT i.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)
+        FROM deleted d
+        JOIN inserted i ON d.participantID = i.participantID;
+    END
+
+    -- Handle DELETE
+    IF EXISTS (SELECT * FROM deleted) AND NOT EXISTS (SELECT * FROM inserted)
+    BEGIN
+        INSERT INTO AuditLog (
+            tableModified,
+            actionType,
+            modifiedBy,
+            oldValue,
+            newValue
+        )
+        SELECT 
+            'Participants',
+            'DELETE',
+            d.rowguid,
+            (SELECT d.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),
+            NULL
+        FROM deleted d;
+    END
+END;
+GO
+
+-- audit triggers
+
+CREATE OR ALTER TRIGGER trg_Audit_Trainings
+ON Trainings
+AFTER INSERT, UPDATE, DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @result TINYINT;
+
+	-- handle INSERT
+    IF EXISTS (SELECT * FROM inserted) AND NOT EXISTS (SELECT * FROM deleted)
+    BEGIN
+        INSERT INTO AuditLog (tableModified, actionType, modifiedBy, oldValue, newValue)
+        SELECT 'Trainings','INSERT', i.rowguid, NULL,
+            (SELECT i.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)
+        FROM inserted i;
+    END
+
+    -- handle UPDATE
+    IF EXISTS (SELECT * FROM inserted) AND EXISTS (SELECT * FROM deleted)
+    BEGIN
+        INSERT INTO AuditLog (tableModified, actionType, modifiedBy,oldValue,newValue)
+        SELECT 'Trainings', 'UPDATE', i.rowguid,
+            (SELECT d.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),
+            (SELECT i.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)
+        FROM deleted d
+        JOIN inserted i ON d.trainingID = i.trainingID;
+    END
+
+    -- handle DELETE
+    IF EXISTS (SELECT * FROM deleted) AND NOT EXISTS (SELECT * FROM inserted)
+    BEGIN
+        INSERT INTO AuditLog (tableModified, actionType, modifiedBy, oldValue, newValue)
+        SELECT 'Trainings', 'DELETE', d.rowguid,
+            (SELECT d.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER), NULL
+        FROM deleted d;
+    END
+END;
+GO
+
 
 -- check if triggers generated successfully
 SELECT t.name AS Table_Name, tr.name AS Trigger_Name
@@ -516,6 +629,13 @@ BEGIN
                     ELSE 'Unknown plan error'
                 END
 
+			WHEN @procedureName LIKE '%Audit%' THEN
+                CASE @resultCode
+                    WHEN 0 THEN 'Audit record created successfully'
+                    WHEN 1 THEN 'Failed to create audit record'
+                    WHEN 2 THEN 'Invalid audit parameters'
+                    ELSE 'Unknown audit error'
+                END
             -- default case
             ELSE 'Unspecified error'
         END;
@@ -543,13 +663,9 @@ BEGIN
     SET @hashed_password = HASHBYTES('SHA2_512', @combined);
 END;
 GO
--- testint the hashing proc
---DECLARE @hp binary(64)
---DECLARE @salt binary(32)
---EXECUTE sp_Hash_Password @hp, @salt
+
+
 GO
-
-
 CREATE OR ALTER PROCEDURE sp_Check_User -- checks if user already exists
 	@first_name nvarchar(50),
 	@last_name nvarchar(50),
@@ -619,7 +735,7 @@ BEGIN
 		VALUES (@first_name, @last_name, @email, @phone_number, @birth_date)
 
 	DECLARE @userGUID UNIQUEIDENTIFIER
-	SET @userGUID = (SELECT rowguid FROM Participants WHERE 
+	SET @userGUID = (SELECT TOP 1 rowguid FROM Participants WHERE 
 		first_name = @first_name AND
 		last_name = @last_name AND 
 		email = @email)
@@ -661,13 +777,13 @@ BEGIN
 	INSERT INTO Trainers(first_name, last_name, email, phone_number, specialization, birth_date) 
 		VALUES (@first_name, @last_name, @email, @phone_number, @specialization, @birth_date)
 
-	DECLARE @userGUID UNIQUEIDENTIFIER
+	/*DECLARE @userGUID UNIQUEIDENTIFIER
 	SET @userGUID = (SELECT rowguid FROM Trainers WHERE 
 		first_name = @first_name AND
 		last_name = @last_name AND 
-		email = @email)
+		email = @email)*/
 
-	INSERT INTO Logs(userGUID, password, salt) VALUES(@userGUID, @hashed_password, @salt)
+	--INSERT INTO Logs(userGUID, password, salt) VALUES(@userGUID, @hashed_password, @salt)
 	SET @result = 0
 	SELECT * FROM fn_GetOperationResult('sp_Register_Trainers', @result);
 END
@@ -910,3 +1026,566 @@ BEGIN
 	SELECT * FROM fn_GetOperationResult('sp_Add_Participant_To_Training', @result);
 END;
 	
+
+	GO
+-- helper procedure to insert audit records
+CREATE OR ALTER PROCEDURE sp_Insert_Audit_Record
+    @tableModified nvarchar(50),
+    @actionType nvarchar(20),
+    @modifiedBy UNIQUEIDENTIFIER,
+    @oldValue nvarchar(MAX),
+    @newValue nvarchar(MAX),
+    @result tinyint output
+WITH ENCRYPTION
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        INSERT INTO AuditLog(tableModified, actionType, modifiedBy, oldValue, newValue)
+        VALUES (@tableModified, @actionType, @modifiedBy, @oldValue, @newValue)
+        SET @result = 0;
+    END TRY
+    BEGIN CATCH
+        SET @result = 1;
+    END CATCH
+    SELECT * FROM fn_GetOperationResult('sp_Insert_Audit_Record', @result);
+END;
+GO
+
+/* ************************************************************************************************************************************************************* */
+-- G - views and indexes
+/* ************************************************************************************************************************************************************* */
+
+-- indexes for performance pptimization
+
+CREATE NONCLUSTERED INDEX IX_Participants_Email 
+ON Participants(email);
+
+CREATE NONCLUSTERED INDEX IX_Participants_Names
+ON Participants(last_name, first_name);
+
+CREATE NONCLUSTERED INDEX IX_Trainings_Date 
+ON Trainings(date);
+
+CREATE NONCLUSTERED INDEX IX_Trainings_TrainerID 
+ON Trainings(trainerID) INCLUDE (date, type, available_slots);
+
+CREATE NONCLUSTERED INDEX IX_Trainings_Availability 
+ON Trainings(available_slots) INCLUDE (date, type, placeID);
+
+CREATE NONCLUSTERED INDEX IX_Memberships_Validity 
+ON Memberships(validity_date);
+
+CREATE NONCLUSTERED INDEX IX_Memberships_Participant 
+ON Memberships(participantID) INCLUDE (type, validity_date);
+
+CREATE NONCLUSTERED INDEX IX_Reviews_Training 
+ON Reviews(trainingID) INCLUDE (rating, comment);
+
+
+GO
+-- general user views
+CREATE VIEW vw_PublicTrainings
+AS
+SELECT 
+    t.trainingID, t.date, t.type, t.available_slots,
+    p.name AS place_name, p.address,
+    tr.first_name + ' ' + tr.last_name AS trainer_name,tr.specialization,
+    pl.type AS plan_type, pl.difficulty_level
+FROM Trainings AS T
+JOIN Places AS P ON t.placeID = p.placeID
+JOIN Trainers AS Tr ON t.trainerID = tr.trainerID
+JOIN Plans AS Pl ON t.planID = pl.planID
+WHERE t.date >= GETDATE()
+GO
+
+CREATE VIEW vw_PublicTrainersList
+AS
+SELECT 
+    first_name,
+    last_name,
+    specialization
+FROM Trainers
+GO
+
+-- registered user views
+CREATE VIEW vw_UserMemberships
+AS
+SELECT 
+    m.membershipID, m.type, m.purchase_date,
+    m.validity_date, m.price,
+    p.first_name, p.last_name
+FROM Memberships AS M
+JOIN Participants AS P ON m.participantID = p.participantID
+GO
+
+CREATE VIEW vw_UserTrainingHistory
+AS
+SELECT 
+    pt.registration_date,
+    t.date AS training_date, t.type AS training_type,
+    pl.type AS plan_type,
+    tr.first_name + ' ' + tr.last_name AS trainer_name,
+    p.name AS place_name
+FROM Participant_Trainings AS Pt
+JOIN Trainings AS T ON pt.trainingID = t.trainingID
+JOIN Places AS P ON t.placeID = p.placeID
+JOIN Trainers AS Tr ON t.trainerID = tr.trainerID
+JOIN Plans AS Pl ON t.planID = pl.planID
+GO
+
+-- trainer views
+CREATE VIEW vw_TrainerSchedule
+AS
+SELECT 
+    t.trainingID, t.date, t.type,
+    t.max_capacity, t.available_slots,
+    p.name AS place_name, p.address,
+    pl.type AS plan_type, pl.difficulty_level,
+    COUNT(pt.participantID) AS current_participants
+FROM Trainings AS T
+JOIN Places AS P ON t.placeID = p.placeID
+JOIN Plans AS Pl ON t.planID = pl.planID
+LEFT JOIN Participant_Trainings pt ON t.trainingID = pt.trainingID
+GROUP BY 
+    t.trainingID, t.date, t.type, t.max_capacity, 
+    t.available_slots, p.name, p.address, 
+    pl.type, pl.difficulty_level
+GO
+
+-- employee views
+CREATE VIEW vw_ParticipantDetails
+AS
+SELECT 
+    p.participantID, p.first_name, p.last_name, p.email, p.phone_number, p.birth_date,
+    COUNT(pt.trainingID) AS total_trainings,
+    COUNT(DISTINCT m.membershipID) AS total_memberships
+FROM Participants AS P
+LEFT JOIN Participant_Trainings AS Pt ON p.participantID = pt.participantID
+LEFT JOIN Memberships AS M ON p.participantID = m.participantID
+GROUP BY 
+    p.participantID, p.first_name, p.last_name, 
+    p.email, p.phone_number, p.birth_date
+GO
+
+CREATE VIEW vw_TrainerPerformance
+AS
+SELECT 
+    tr.trainerID, tr.first_name, tr.last_name, tr.specialization,
+    COUNT(t.trainingID) AS total_trainings,
+    AVG(CAST(r.rating AS FLOAT)) AS avg_rating,
+    COUNT(DISTINCT pt.participantID) AS total_participants
+FROM Trainers AS Tr
+LEFT JOIN Trainings AS T ON tr.trainerID = t.trainerID
+LEFT JOIN Reviews AS R ON t.trainingID = r.trainingID
+LEFT JOIN Participant_Trainings AS Pt ON t.trainingID = pt.trainingID
+GROUP BY 
+    tr.trainerID, tr.first_name, tr.last_name, tr.specialization
+GO
+
+CREATE OR ALTER VIEW vw_AuditLog
+AS
+SELECT auditID, tableModified, actionType, modifiedBy, modifiedDate, ISNULL(oldValue, 'N/A') as oldValue, ISNULL(newValue, 'N/A') as newValu FROM AuditLog;
+GO
+
+/* ************************************************************************************************************************************************************* */
+-- H - roles and security measures
+/* ************************************************************************************************************************************************************* */
+
+-- create database roles
+CREATE ROLE GeneralUser;
+CREATE ROLE Participant;
+CREATE ROLE Trainer;
+CREATE ROLE Employee;
+CREATE ROLE Administrator;
+
+-- general user permissions
+GRANT SELECT ON vw_PublicTrainings TO GeneralUser;
+GRANT SELECT ON vw_PublicTrainersList TO GeneralUser;
+
+-- participant permissions
+GRANT SELECT ON vw_PublicTrainings TO Participant;
+GRANT SELECT ON vw_PublicTrainersList TO Participant;
+GRANT SELECT ON vw_UserMemberships TO Participant;
+GRANT SELECT ON vw_UserTrainingHistory TO Participant;
+
+-- allow participants to sign up for trainings and purchase memberships
+GRANT INSERT ON Participant_Trainings TO Participant;
+GRANT INSERT ON Memberships TO Participant;
+GRANT INSERT ON Reviews TO Participant;
+GRANT UPDATE ON Reviews TO Participant;
+
+-- trainer permissions
+GRANT SELECT ON vw_TrainerSchedule TO Trainer;
+GRANT SELECT ON Participant_Trainings TO Trainer;
+GRANT SELECT ON vw_PublicTrainings TO Trainer;
+
+-- employee permissions
+GRANT SELECT ON vw_ParticipantDetails TO Employee;
+GRANT SELECT ON vw_TrainerPerformance TO Employee;
+GRANT SELECT, INSERT, UPDATE ON Participants TO Employee;
+GRANT SELECT, INSERT, UPDATE ON Trainers TO Employee;
+GRANT SELECT, INSERT, UPDATE ON Trainings TO Employee;
+GRANT SELECT, INSERT, UPDATE ON Places TO Employee;
+GRANT SELECT, INSERT, UPDATE ON Plans TO Employee;
+GRANT SELECT, INSERT, UPDATE ON Memberships TO Employee;
+
+GRANT SELECT ON vw_AuditLog TO Administrator;
+GRANT EXECUTE ON sp_Insert_Audit_Record TO Administrator;
+-- admin permissions (full access)
+GRANT CONTROL ON DATABASE::TrainingMgmtDB TO Administrator;
+
+
+GO
+-- create procedure to add new users
+CREATE OR ALTER PROCEDURE sp_Create_User
+    @username nvarchar(50),
+    @password nvarchar(100),
+    @email nvarchar(50),
+    @first_name nvarchar(50),
+    @last_name nvarchar(50),
+    @phone_number nvarchar(15),
+	@specialization nvarchar(50) = NULL,
+    @birth_date date,
+    @user_type nvarchar(20)
+	WITH ENCRYPTION
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRANSACTION;
+    
+    BEGIN TRY
+        DECLARE @SQL NVARCHAR(MAX);
+        SET @SQL = 'CREATE LOGIN ' + QUOTENAME(@username) + 
+                   ' WITH PASSWORD = ''' + @password + '''';
+        EXEC(@SQL);
+        
+        SET @SQL = 'CREATE USER ' + QUOTENAME(@username) + 
+                   ' FOR LOGIN ' + QUOTENAME(@username);
+        EXEC(@SQL);
+        
+        -- add user to appropriate role
+		DECLARE @result tinyint
+        IF @user_type = 'GENERAL'
+            SET @SQL = 'ALTER ROLE GeneralUser ADD MEMBER ' + QUOTENAME(@username);
+        ELSE IF @user_type = 'REGISTERED'
+        BEGIN
+            -- insert into participants table
+			EXEC sp_Register_Participants @first_name, @last_name, @email, @phone_number, @birth_date, @password, @result
+            SET @SQL = 'ALTER ROLE Participant ADD MEMBER ' + QUOTENAME(@username);
+        END
+        ELSE IF @user_type = 'TRAINER'
+        BEGIN
+			EXEC sp_Register_Trainers @first_name, @last_name, @email, @phone_number, @specialization, @birth_date, @password, @result
+            SET @SQL = 'ALTER ROLE Trainer ADD MEMBER ' + QUOTENAME(@username);
+        END
+        ELSE IF @user_type = 'EMPLOYEE'
+            SET @SQL = 'ALTER ROLE Employee ADD MEMBER ' + QUOTENAME(@username);
+        ELSE IF @user_type = 'ADMIN'
+            SET @SQL = 'ALTER ROLE Administrator ADD MEMBER ' + QUOTENAME(@username);
+            
+        EXEC(@SQL);
+        
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH
+END;
+GO
+
+-- Create procedure to remove users
+CREATE  OR ALTER PROCEDURE sp_Remove_User
+    @username NVARCHAR(50),
+    @user_type NVARCHAR(20)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRANSACTION;
+    
+    BEGIN TRY
+        -- Remove user from role
+        DECLARE @SQL NVARCHAR(MAX);
+        IF @user_type = 'REGISTERED'
+        BEGIN
+            -- delete from participants and related tables
+            DECLARE @participantID INT;
+            SELECT @participantID = participantID 
+            FROM Participants 
+            WHERE email = (SELECT email FROM sys.database_principals WHERE name = @username);
+            
+            DELETE FROM Participant_Trainings WHERE participantID = @participantID;
+            DELETE FROM Reviews WHERE participantID = @participantID;
+            DELETE FROM Memberships WHERE participantID = @participantID;
+            DELETE FROM Participants WHERE participantID = @participantID;
+        END
+        
+        -- Drop user and login
+        SET @SQL = 'DROP USER ' + QUOTENAME(@username);
+        EXEC(@SQL);
+        
+        SET @SQL = 'DROP LOGIN ' + QUOTENAME(@username);
+        EXEC(@SQL);
+        
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH
+END;
+GO
+
+-- example usage of creating users:
+-- general user
+EXEC sp_Create_User 
+    @username = 'general_user1',
+    @password = 'SecurePass123!',
+    @email = 'general1@example.com',
+    @first_name = 'John',
+    @last_name = 'Doe',
+    @phone_number = '1234567890',
+	@specialization = NULL,
+    @birth_date = '1990-01-01',
+    @user_type = 'GENERAL';
+
+-- registered user
+EXEC sp_Create_User 
+    @username = 'registered_user1',
+    @password = 'SecurePass123!',
+    @email = 'registered1@example.com',
+    @first_name = 'Jane',
+    @last_name = 'Smith',
+    @phone_number = '1234567891',
+	@specialization = NULL,
+    @birth_date = '1992-02-02',
+    @user_type = 'REGISTERED';
+
+-- trainer
+EXEC sp_Create_User 
+    @username = 'trainer1',
+    @password = 'SecurePass123!',
+    @email = 'trainer1@example.com',
+    @first_name = 'John',
+    @last_name = 'Speller',
+    @phone_number = '1234567891',
+	@specialization = 'judo',
+    @birth_date = '1992-02-02',
+    @user_type = 'REGISTERED';
+
+-- admin user
+EXEC sp_Create_User 
+    @username = 'admin_user1',
+    @password = 'AdminPass123!',
+    @email = 'admin1@example.com',
+    @first_name = 'Admin',
+    @last_name = 'User',
+    @phone_number = '1234567892',
+	@specialization = NULL,
+    @birth_date = '1985-03-03',
+    @user_type = 'ADMIN';
+
+-- to run procedure etc. with full access:
+EXECUTE AS user = 'admin_user1' 
+
+
+
+/* ************************************************************************************************************************************************************* */
+-- H - Data insert and testing
+/* ************************************************************************************************************************************************************* */
+
+INSERT INTO Plans (type, difficulty_level, description)
+    VALUES 
+        ('Strength', 3, 'Full body strength training program focusing on compound movements'),
+        ('Cardio', 2, 'High-intensity cardio workout for fat burning'),
+        ('Yoga', 1, 'Beginner-friendly yoga flow for flexibility'),
+        ('Pilates', 4, 'Advanced Pilates workout focusing on core strength'),
+        ('HIIT', 5, 'Intense interval training for maximum calorie burn'),
+        ('Strength', 4, 'Upper body strength focus with progressive overload'),
+        ('Cardio', 3, 'Endurance-building cardio circuit'),
+        ('Yoga', 2, 'Intermediate yoga flow with balance poses'),
+        ('HIIT', 4, 'Boxing-inspired HIIT workout'),
+        ('Pilates', 3, 'Core and flexibility focused Pilates session');
+
+    -- Insert Places
+    INSERT INTO Places (name, address, type)
+    VALUES 
+        ('Main Studio', '123 Fitness St', 'Studio'),
+        ('Olympic Pool', '456 Sport Ave', 'Pool'),
+        ('East Field', '789 Training Rd', 'Field'),
+        ('West Court', '321 Game Blvd', 'Court'),
+        ('Zen Studio', '654 Wellness Way', 'Studio'),
+        ('Indoor Pool', '987 Aqua Lane', 'Pool'),
+        ('South Field', '147 Exercise Dr', 'Field'),
+        ('North Court', '258 Activity St', 'Court'),
+        ('Flow Studio', '369 Health Ave', 'Studio'),
+        ('Training Field', '741 Fitness Rd', 'Field');
+
+	
+    -- Register Trainers
+    /*
+	EXEC sp_Register_Trainers 'John', 'Smith', 'john.smith@gym.com', '1234567890', 'Strength Training', '1985-03-15', 'Pass123!', @result;
+    EXEC sp_Register_Trainers 'Sarah', 'Johnson', 'sarah.j@gym.com', '2345678901', 'Yoga', '1990-06-22', 'Pass123!', @result;
+    EXEC sp_Register_Trainers 'Mike', 'Brown', 'mike.b@gym.com', '3456789012', 'HIIT', '1988-09-10', 'Pass123!', @result;
+    EXEC sp_Register_Trainers 'Emma', 'Davis', 'emma.d@gym.com', '4567890123', 'Pilates', '1992-12-05', 'Pass123!', @result;
+    EXEC sp_Register_Trainers 'James', 'Wilson', 'james.w@gym.com', '5678901234', 'Cardio', '1987-04-18', 'Pass123!', @result;
+    EXEC sp_Register_Trainers 'Lisa', 'Anderson', 'lisa.a@gym.com', '6789012345', 'Strength Training', '1991-07-25', 'Pass123!', @result;
+    EXEC sp_Register_Trainers 'David', 'Taylor', 'david.t@gym.com', '7890123456', 'HIIT', '1989-10-30', 'Pass123!', @result;
+    EXEC sp_Register_Trainers 'Amy', 'Martin', 'amy.m@gym.com', '8901234567', 'Yoga', '1993-01-15', 'Pass123!', @result;
+    EXEC sp_Register_Trainers 'Chris', 'Clark', 'chris.c@gym.com', '9012345678', 'Pilates', '1986-05-20', 'Pass123!', @result;
+    EXEC sp_Register_Trainers 'Rachel', 'White', 'rachel.w@gym.com', '0123456789', 'Cardio', '1990-08-12', 'Pass123!', @result;
+	*/
+
+    -- Register Participants
+    /*EXEC sp_Register_Participants 'Alice', 'Cooper', 'alice.c@email.com', '1122334455', '1995-02-10', 'Pass123!', @result;
+    EXEC sp_Register_Participants 'Bob', 'Mitchell', 'bob.m@email.com', '2233445566', '1988-07-15', 'Pass123!', @result;
+    EXEC sp_Register_Participants 'Carol', 'Hayes', 'carol.h@email.com', '3344556677', '1992-11-20', 'Pass123!', @result;
+    EXEC sp_Register_Participants 'Daniel', 'Foster', 'daniel.f@email.com', '4455667788', '1990-04-25', 'Pass123!', @result;
+    EXEC sp_Register_Participants 'Eve', 'Graham', 'eve.g@email.com', '5566778899', '1993-09-30', 'Pass123!', @result;
+    EXEC sp_Register_Participants 'Frank', 'Peters', 'frank.p@email.com', '6677889900', '1987-03-05', 'Pass123!', @result;
+    EXEC sp_Register_Participants 'Grace', 'Murray', 'grace.m@email.com', '7788990011', '1991-08-10', 'Pass123!', @result;
+    EXEC sp_Register_Participants 'Henry', 'Wells', 'henry.w@email.com', '8899001122', '1994-01-15', 'Pass123!', @result;
+    EXEC sp_Register_Participants 'Iris', 'Butler', 'iris.b@email.com', '9900112233', '1989-06-20', 'Pass123!', @result;
+    EXEC sp_Register_Participants 'Jack', 'Rogers', 'jack.r@email.com', '0011223344', '1992-11-25', 'Pass123!', @result;
+	*/
+    -- Insert Trainings
+    -- Get trainer IDs
+    DECLARE @trainerID1 INT, @trainerID2 INT;
+    SELECT TOP 2 @trainerID1 = trainerID, @trainerID2 = trainerID 
+    FROM Trainers ORDER BY trainerID;
+
+    INSERT INTO Trainings (planID, placeID, trainerID, date, type, max_capacity, available_slots)
+    VALUES 
+        (1, 1, @trainerID1, DATEADD(day, 1, GETDATE()), 'Group', 15, 15),
+        (2, 2, @trainerID2, DATEADD(day, 2, GETDATE()), 'Individual', 1, 1),
+        (3, 3, @trainerID1, DATEADD(day, 3, GETDATE()), 'Group', 20, 20),
+        (4, 4, @trainerID2, DATEADD(day, 4, GETDATE()), 'Group', 12, 12),
+        (5, 5, @trainerID1, DATEADD(day, 5, GETDATE()), 'Individual', 1, 1),
+        (6, 6, @trainerID2, DATEADD(day, 6, GETDATE()), 'Group', 15, 15),
+        (7, 7, @trainerID1, DATEADD(day, 7, GETDATE()), 'Group', 18, 18),
+        (8, 8, @trainerID2, DATEADD(day, 8, GETDATE()), 'Individual', 1, 1),
+        (9, 9, @trainerID1, DATEADD(day, 9, GETDATE()), 'Group', 25, 25),
+        (10, 10, @trainerID2, DATEADD(day, 10, GETDATE()), 'Group', 20, 20);
+
+    -- Add participants to trainings and create memberships
+    DECLARE @participantID INT;
+    SELECT TOP 1 @participantID = participantID FROM Participants ORDER BY participantID;
+	DECLARE @result tinyint
+    -- Add memberships for participants
+    --EXEC sp_Add_Membership @participantID, '1 month', '2024-12-27', 50.00, @result;
+    
+    -- Register participants for trainings
+    DECLARE @trainingID INT;
+    SELECT TOP 1 @trainingID = trainingID FROM Trainings ORDER BY trainingID;
+    
+    --EXEC sp_Add_Participant_To_Training @participantID, @trainingID, @result;
+
+    -- Add reviews
+    INSERT INTO Reviews (trainingID, participantID, rating, comment)
+    VALUES 
+        (@trainingID, @participantID, 5, 'Excellent training session!'),
+        (@trainingID, @participantID, 4, 'Great workout, very challenging'),
+        (@trainingID, @participantID, 5, 'Amazing instructor and facility'),
+        (@trainingID, @participantID, 4, 'Really enjoyed the class'),
+        (@trainingID, @participantID, 5, 'Best training session ever'),
+        (@trainingID, @participantID, 4, 'Very professional and motivating'),
+        (@trainingID, @participantID, 5, 'Will definitely come back'),
+        (@trainingID, @participantID, 4, 'Good energy and atmosphere'),
+        (@trainingID, @participantID, 5, 'Exceeded my expectations'),
+        (@trainingID, @participantID, 4, 'Well-structured training program');
+GO
+
+
+SELECT * FROM Participants
+SELECT * FROM Participant_Trainings
+SELECT * FROM Trainings
+SELECT * FROM Trainers
+SELECT * FROM Places
+SELECT * FROM Plans
+SELECT * FROM Memberships
+SELECT * FROM Logs
+SELECT * FROM AuditLog
+SELECT * FROM Reviews
+
+GO
+-- Now let's create some verification views
+CREATE OR ALTER VIEW vw_CompleteTrainingSchedule
+AS
+SELECT 
+    t.trainingID,
+    t.date,
+    t.type AS training_type,
+    t.max_capacity,
+    t.available_slots,
+    p.name AS place_name,
+    p.type AS place_type,
+    tr.first_name + ' ' + tr.last_name AS trainer_name,
+    tr.specialization AS trainer_specialization,
+    pl.type AS plan_type,
+    pl.difficulty_level
+FROM Trainings t
+JOIN Places p ON t.placeID = p.placeID
+JOIN Trainers tr ON t.trainerID = tr.trainerID
+JOIN Plans pl ON t.planID = pl.planID;
+GO
+
+CREATE OR ALTER VIEW vw_ParticipantMembershipStatus
+AS
+SELECT 
+    p.participantID,
+    p.first_name + ' ' + p.last_name AS participant_name,
+    m.type AS membership_type,
+    m.purchase_date,
+    m.validity_date,
+    m.price,
+    CASE 
+        WHEN m.validity_date >= GETDATE() THEN 'Active'
+        ELSE 'Expired'
+    END AS membership_status
+FROM Participants p
+LEFT JOIN Memberships m ON p.participantID = m.participantID;
+GO
+
+CREATE OR ALTER VIEW vw_TrainingReviews
+AS
+SELECT 
+    t.trainingID,
+    t.date AS training_date,
+    t.type AS training_type,
+    tr.first_name + ' ' + tr.last_name AS trainer_name,
+    p.name AS place_name,
+    r.rating,
+    r.comment,
+    part.first_name + ' ' + part.last_name AS reviewer_name
+FROM Trainings t
+JOIN Reviews r ON t.trainingID = r.trainingID
+JOIN Trainers tr ON t.trainerID = tr.trainerID
+JOIN Places p ON t.placeID = p.placeID
+JOIN Participants part ON r.participantID = part.participantID;
+GO
+
+-- Queries to verify the data
+SELECT 'Trainers' AS DataSet, COUNT(*) AS RecordCount FROM Trainers
+UNION ALL
+SELECT 'Participants', COUNT(*) FROM Participants
+UNION ALL
+SELECT 'Places', COUNT(*) FROM Places
+UNION ALL
+SELECT 'Plans', COUNT(*) FROM Plans
+UNION ALL
+SELECT 'Trainings', COUNT(*) FROM Trainings
+UNION ALL
+SELECT 'Reviews', COUNT(*) FROM Reviews
+UNION ALL
+SELECT 'Memberships', COUNT(*) FROM Memberships;
+
+-- View the complete training schedule
+SELECT * FROM vw_CompleteTrainingSchedule;
+
+-- View participant membership status
+SELECT * FROM vw_ParticipantMembershipStatus;
+
+-- View training reviews
+SELECT * FROM vw_TrainingReviews;
