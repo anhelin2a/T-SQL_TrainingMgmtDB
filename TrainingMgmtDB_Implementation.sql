@@ -51,21 +51,17 @@ BEGIN
 	)
 END
 
--- add mail confirmation of joining functionality
-
-
 IF NOT EXISTS(SELECT * FROM dbo.sysobjects WHERE ID = OBJECT_ID(N'dbo.Plans') AND OBJECTPROPERTY(ID, N'IsTable') = 1)
 BEGIN 
 	CREATE TABLE Plans(
 		planID				INT PRIMARY KEY IDENTITY(1, 1),
-		type				nvarchar(50)	 NOT NULL,
-		difficulty_level	int				 NOT NULL,
-		description			nvarchar(500)	 NOT NULL,
-		modified_date		datetime		 DEFAULT (GETDATE()),
+		type				nvarchar(50)	NOT NULL,
+		difficulty_level	tinyint			NOT NULL,
+		description			nvarchar(500)	NOT NULL,
+		modified_date		datetime		DEFAULT (GETDATE()),
 		rowguid				UNIQUEIDENTIFIER DEFAULT NEWID() UNIQUE NOT NULL
 	)
 END
-
 
 
 IF NOT EXISTS(SELECT * FROM dbo.sysobjects WHERE ID = OBJECT_ID(N'dbo.Trainers') AND OBJECTPROPERTY(ID, N'IsTable') = 1)
@@ -83,8 +79,6 @@ BEGIN
 	)
 END
 
--- add mail confirmation of joining functionality
-
 
 IF NOT EXISTS (SELECT * FROM dbo.sysobjects WHERE ID = OBJECT_ID(N'dbo.Places') AND OBJECTPROPERTY(ID, N'IsTable') =1)
 BEGIN
@@ -97,7 +91,6 @@ BEGIN
 		rowguid			UNIQUEIDENTIFIER DEFAULT NEWID() UNIQUE NOT NULL
 	)
 END
-
 
 
 IF NOT EXISTS (SELECT * FROM dbo.sysobjects WHERE ID = OBJECT_ID(N'dbo.Trainings') AND OBJECTPROPERTY(ID, N'IsTable') = 1)
@@ -123,12 +116,11 @@ BEGIN
 		ptID					INT PRIMARY KEY IDENTITY(1, 1),
 		trainingID				INT FOREIGN KEY REFERENCES Trainings(trainingID)		ON UPDATE CASCADE,
 		participantID			INT FOREIGN KEY REFERENCES Participants(participantID)	ON UPDATE CASCADE,
-		registration_date		date DEFAULT (GETDATE()) NOT NULL,  -- please work here
+		registration_date		date DEFAULT (GETDATE()) NOT NULL,  
 		modified_date			datetime		 DEFAULT (GETDATE()),
 		rowguid					UNIQUEIDENTIFIER DEFAULT NEWID() UNIQUE NOT NULL
 	)
 END
-
 
 
 IF NOT EXISTS (SELECT * FROM dbo.sysobjects WHERE ID = OBJECT_ID(N'dbo.Reviews') AND OBJECTPROPERTY(ID, N'IsTable') = 1)
@@ -143,7 +135,6 @@ BEGIN
 		rowguid				UNIQUEIDENTIFIER DEFAULT NEWID() UNIQUE NOT NULL
 	)
 END
-
 
 
 IF NOT EXISTS (SELECT * FROM dbo.sysobjects WHERE ID = OBJECT_ID(N'dbo.Memberships') AND OBJECTPROPERTY(ID, N'IsTable') = 1)
@@ -165,7 +156,7 @@ IF NOT EXISTS (SELECT * FROM dbo.sysobjects WHERE ID = OBJECT_ID(N'Logs') AND OB
 BEGIN
 	CREATE TABLE Logs(
 		logID				INT PRIMARY KEY IDENTITY(1, 1),
-		userGUID			UNIQUEIDENTIFIER FOREIGN KEY REFERENCES Participants(rowguid) ON UPDATE CASCADE,
+		userGUID			UNIQUEIDENTIFIER FOREIGN KEY REFERENCES Participants(rowguid) ON UPDATE CASCADE UNIQUE,
 		password			varbinary(64)	 NOT NULL,
 		salt				varbinary(32)	 NOT NULL,
 		modified_date		datetime		 DEFAULT (GETDATE()),
@@ -174,11 +165,10 @@ BEGIN
 END
 
 
-
 IF NOT EXISTS (SELECT * FROM dbo.sysobjects WHERE ID = OBJECT_ID(N'AuditLog') AND OBJECTPROPERTY(ID, N'IsTable') = 1)
 BEGIN
 	CREATE TABLE AuditLog (
-    auditID				INT PRIMARY KEY IDENTITY(1,1),
+    auditID				INT PRIMARY KEY IDENTITY(1,1),   
     tableModified		NVARCHAR(50),
     actionType			NVARCHAR(20),
     modifiedBy			UNIQUEIDENTIFIER,
@@ -255,13 +245,14 @@ EXEC sp_executesql @SQL;
 
 GO
 -- test on data
+/*
 insert into Participants(first_name, last_name, email, phone_number, birth_date) values ('test_name', 'test_surname', '----', '----', '2000-01-01')
 select * from Participants -- before trigger
 
 update Participants
 set last_name = 'test_surname_updated' where participantID = 2
 
-select * from Participants -- after trigger, modified_date should be updated
+select * from Participants -- after trigger, modified_date should be updated*/
 
 GO
 -- additional triggers
@@ -676,7 +667,7 @@ AS
 BEGIN
 	SET NOCOUNT ON
 	IF EXISTS(
-		SELECT * FROM Participants WHERE 
+		SELECT TOP 1 participantID FROM Participants WHERE 
 			@first_name = first_name AND
 			@last_name = last_name AND
 			@email = email
@@ -688,7 +679,7 @@ BEGIN
 	END
 	ELSE
 	IF EXISTS (
-		SELECT * FROM Trainers WHERE 
+		SELECT TOP 1 trainerID FROM Trainers WHERE 
 			@first_name = first_name AND
 			@last_name = last_name AND
 			@email = email
@@ -791,7 +782,7 @@ END
 
 GO
 CREATE OR ALTER PROCEDURE sp_Validate_Participant_OnLogIn
-	@participantID int,
+	@email varchar(50),
 	@password nvarchar(50),
 	@result tinyint OUTPUT
 	WITH ENCRYPTION
@@ -799,9 +790,9 @@ AS
 BEGIN
 	SET NOCOUNT ON
 
-	DECLARE @first_name varchar(50), @last_name varchar(50), @email varchar(50)
+	DECLARE @first_name varchar(50), @last_name varchar(50), @participantID int
 	DECLARE @userGUID UNIQUEIDENTIFIER
-	SELECT @first_name = first_name, @last_name = last_name, @email = email, @userGUID = rowguid FROM Participants WHERE participantID = @participantID;
+	SELECT @first_name = first_name, @last_name = last_name, @participantID = participantID, @userGUID = rowguid FROM Participants WHERE @email = email
 
 	DECLARE @user_exists TINYINT
 	EXEC sp_Check_User @first_name, @last_name, @email, @user_exists
@@ -1391,110 +1382,247 @@ EXEC sp_Create_User
 EXECUTE AS user = 'admin_user1' 
 
 
-
 /* ************************************************************************************************************************************************************* */
--- H - Data insert and testing
+-- I - Data insert and testing
 /* ************************************************************************************************************************************************************* */
 
+DECLARE @result tinyint
+
+PRINT '1. Testing Participants Registration'
+------------------------------------------------------------------------------------------------
+-- test valid participant registration
+EXEC sp_Register_Participants 
+    'John', 'Doe', 'john.doe@email.com', '123-456-7890', '1990-01-01', 'SecurePass123!', @result
+PRINT 'Expected: Success (0), Actual: ' + CAST(@result AS VARCHAR)
+GO
+DECLARE @result tinyint
+EXEC sp_Register_Participants 
+    'Jan', 'Kowalski', 'jan.kowalski@email.com', '123-456-7890', '1990-01-02', 'SecurePass123!', @result
+PRINT 'Expected: Success (0), Actual: ' + CAST(@result AS VARCHAR)
+GO
+DECLARE @result tinyint
+EXEC sp_Register_Participants 
+    'Kate', 'Zaza', 'kate.zaza@email.com', '123-456-7890', '1990-01-03', 'SecurePass123!', @result
+PRINT 'Expected: Success (0), Actual: ' + CAST(@result AS VARCHAR)
+GO
+DECLARE @result tinyint
+EXEC sp_Register_Participants 
+    'Kate', 'Zaza', 'kate.zaza@email.com', '123-456-7890', '1990-01-03', 'SecurePass123!', @result
+PRINT 'Expected: Success (0), Actual: ' + CAST(@result AS VARCHAR)
+
+-- test duplicate email
+EXEC sp_Register_Participants 
+    'Jane', 'Doe', 'john.doe@email.com', '123-456-7891', '1990-01-01', 'SecurePass123!', @result
+PRINT 'Expected: Error (1 - User exists), Actual: ' + CAST(@result AS VARCHAR)
+
+-- test underage participant (< 12 years)
+EXEC sp_Register_Participants 
+    'Young', 'User', 'young.user@email.com', '123-456-7892', '2020-01-01', 'SecurePass123!', @result
+PRINT 'Expected: Error (Age constraint violation), Actual: ' + CAST(@result AS VARCHAR)
+GO
+PRINT '2. Testing Trainer Registration'
+DECLARE @result tinyint
+------------------------------------------------------------------------------------------------
+-- test valid trainer registration
+EXEC sp_Register_Trainers 
+    'Mike', 'Smith', 'mike.smith@gym.com', '123-456-7893', 'Strength Training', '1985-01-01', 'SecurePass123!', @result
+PRINT 'Expected: Success (0), Actual: ' + CAST(@result AS VARCHAR)
+
+-- test duplicate email
+EXEC sp_Register_Trainers 
+    'Michael', 'Smith', 'mike.smith@gym.com', '123-456-7894', 'Yoga', '1985-01-01', 'SecurePass123!', @result
+PRINT 'Expected: Error (1 - User exists), Actual: ' + CAST(@result AS VARCHAR)
+
+-- test underage trainer (< 18 years)
+EXEC sp_Register_Trainers 
+    'Young', 'Trainer', 'young.trainer@gym.com', '123-456-7895', 'Cardio', '2010-01-01', 'SecurePass123!', @result
+PRINT 'Expected: Error (Age constraint violation), Actual: ' + CAST(@result AS VARCHAR)
+
+PRINT '3. Testing Plans'
+------------------------------------------------------------------------------------------------
+-- test valid plan insertion
 INSERT INTO Plans (type, difficulty_level, description)
-    VALUES 
-        ('Strength', 3, 'Full body strength training program focusing on compound movements'),
-        ('Cardio', 2, 'High-intensity cardio workout for fat burning'),
-        ('Yoga', 1, 'Beginner-friendly yoga flow for flexibility'),
-        ('Pilates', 4, 'Advanced Pilates workout focusing on core strength'),
-        ('HIIT', 5, 'Intense interval training for maximum calorie burn'),
-        ('Strength', 4, 'Upper body strength focus with progressive overload'),
-        ('Cardio', 3, 'Endurance-building cardio circuit'),
-        ('Yoga', 2, 'Intermediate yoga flow with balance poses'),
-        ('HIIT', 4, 'Boxing-inspired HIIT workout'),
-        ('Pilates', 3, 'Core and flexibility focused Pilates session');
+VALUES ('Strength', 3, 'Intermediate strength training program')
+PRINT 'Expected: Success'
 
-    -- Insert Places
+-- test invalid difficulty level
+BEGIN TRY
+    INSERT INTO Plans (type, difficulty_level, description)
+    VALUES ('Strength', 6, 'Invalid difficulty level')
+    PRINT 'Error: Should not allow difficulty_level > 5'
+END TRY
+BEGIN CATCH
+    PRINT 'Expected error caught: ' + ERROR_MESSAGE()
+END CATCH
+
+-- test invalid type
+BEGIN TRY
+    INSERT INTO Plans (type, difficulty_level, description)
+    VALUES ('InvalidType', 3, 'Invalid type')
+    PRINT 'Error: Should not allow invalid type'
+END TRY
+BEGIN CATCH
+    PRINT 'Expected error caught: ' + ERROR_MESSAGE()
+END CATCH
+
+PRINT '4. Testing Places'
+------------------------------------------------------------------------------------------------
+-- test valid place insertion
+INSERT INTO Places (name, address, type)
+VALUES ('Main Gym', '123 Fitness St', 'Studio')
+PRINT 'Expected: Success'
+
+-- test invalid type
+BEGIN TRY
     INSERT INTO Places (name, address, type)
-    VALUES 
-        ('Main Studio', '123 Fitness St', 'Studio'),
-        ('Olympic Pool', '456 Sport Ave', 'Pool'),
-        ('East Field', '789 Training Rd', 'Field'),
-        ('West Court', '321 Game Blvd', 'Court'),
-        ('Zen Studio', '654 Wellness Way', 'Studio'),
-        ('Indoor Pool', '987 Aqua Lane', 'Pool'),
-        ('South Field', '147 Exercise Dr', 'Field'),
-        ('North Court', '258 Activity St', 'Court'),
-        ('Flow Studio', '369 Health Ave', 'Studio'),
-        ('Training Field', '741 Fitness Rd', 'Field');
+    VALUES ('Invalid Place', '123 Test St', 'InvalidType')
+    PRINT 'Error: Should not allow invalid type'
+END TRY
+BEGIN CATCH
+    PRINT 'Expected error caught: ' + ERROR_MESSAGE()
+END CATCH
 
-	
-    -- Register Trainers
-    /*
-	EXEC sp_Register_Trainers 'John', 'Smith', 'john.smith@gym.com', '1234567890', 'Strength Training', '1985-03-15', 'Pass123!', @result;
-    EXEC sp_Register_Trainers 'Sarah', 'Johnson', 'sarah.j@gym.com', '2345678901', 'Yoga', '1990-06-22', 'Pass123!', @result;
-    EXEC sp_Register_Trainers 'Mike', 'Brown', 'mike.b@gym.com', '3456789012', 'HIIT', '1988-09-10', 'Pass123!', @result;
-    EXEC sp_Register_Trainers 'Emma', 'Davis', 'emma.d@gym.com', '4567890123', 'Pilates', '1992-12-05', 'Pass123!', @result;
-    EXEC sp_Register_Trainers 'James', 'Wilson', 'james.w@gym.com', '5678901234', 'Cardio', '1987-04-18', 'Pass123!', @result;
-    EXEC sp_Register_Trainers 'Lisa', 'Anderson', 'lisa.a@gym.com', '6789012345', 'Strength Training', '1991-07-25', 'Pass123!', @result;
-    EXEC sp_Register_Trainers 'David', 'Taylor', 'david.t@gym.com', '7890123456', 'HIIT', '1989-10-30', 'Pass123!', @result;
-    EXEC sp_Register_Trainers 'Amy', 'Martin', 'amy.m@gym.com', '8901234567', 'Yoga', '1993-01-15', 'Pass123!', @result;
-    EXEC sp_Register_Trainers 'Chris', 'Clark', 'chris.c@gym.com', '9012345678', 'Pilates', '1986-05-20', 'Pass123!', @result;
-    EXEC sp_Register_Trainers 'Rachel', 'White', 'rachel.w@gym.com', '0123456789', 'Cardio', '1990-08-12', 'Pass123!', @result;
-	*/
+PRINT '5. Testing Trainings'
+------------------------------------------------------------------------------------------------
+DECLARE @planID INT, @placeID INT, @trainerID INT
+SELECT TOP 1 @planID = planID FROM Plans
+SELECT TOP 1 @placeID = placeID FROM Places
+SELECT TOP 1 @trainerID = trainerID FROM Trainers
 
-    -- Register Participants
-    /*EXEC sp_Register_Participants 'Alice', 'Cooper', 'alice.c@email.com', '1122334455', '1995-02-10', 'Pass123!', @result;
-    EXEC sp_Register_Participants 'Bob', 'Mitchell', 'bob.m@email.com', '2233445566', '1988-07-15', 'Pass123!', @result;
-    EXEC sp_Register_Participants 'Carol', 'Hayes', 'carol.h@email.com', '3344556677', '1992-11-20', 'Pass123!', @result;
-    EXEC sp_Register_Participants 'Daniel', 'Foster', 'daniel.f@email.com', '4455667788', '1990-04-25', 'Pass123!', @result;
-    EXEC sp_Register_Participants 'Eve', 'Graham', 'eve.g@email.com', '5566778899', '1993-09-30', 'Pass123!', @result;
-    EXEC sp_Register_Participants 'Frank', 'Peters', 'frank.p@email.com', '6677889900', '1987-03-05', 'Pass123!', @result;
-    EXEC sp_Register_Participants 'Grace', 'Murray', 'grace.m@email.com', '7788990011', '1991-08-10', 'Pass123!', @result;
-    EXEC sp_Register_Participants 'Henry', 'Wells', 'henry.w@email.com', '8899001122', '1994-01-15', 'Pass123!', @result;
-    EXEC sp_Register_Participants 'Iris', 'Butler', 'iris.b@email.com', '9900112233', '1989-06-20', 'Pass123!', @result;
-    EXEC sp_Register_Participants 'Jack', 'Rogers', 'jack.r@email.com', '0011223344', '1992-11-25', 'Pass123!', @result;
-	*/
-    -- Insert Trainings
-    -- Get trainer IDs
-    DECLARE @trainerID1 INT, @trainerID2 INT;
-    SELECT TOP 2 @trainerID1 = trainerID, @trainerID2 = trainerID 
-    FROM Trainers ORDER BY trainerID;
+-- test valid training insertion
+INSERT INTO Trainings (planID, placeID, trainerID, date, type, max_capacity, available_slots)
+VALUES (@planID, @placeID, @trainerID, DATEADD(day, 1, GETDATE()), 'Group', 15, 15)
+PRINT 'Expected: Success'
 
+-- test invalid available slots (> max_capacity)
+BEGIN TRY
     INSERT INTO Trainings (planID, placeID, trainerID, date, type, max_capacity, available_slots)
-    VALUES 
-        (1, 1, @trainerID1, DATEADD(day, 1, GETDATE()), 'Group', 15, 15),
-        (2, 2, @trainerID2, DATEADD(day, 2, GETDATE()), 'Individual', 1, 1),
-        (3, 3, @trainerID1, DATEADD(day, 3, GETDATE()), 'Group', 20, 20),
-        (4, 4, @trainerID2, DATEADD(day, 4, GETDATE()), 'Group', 12, 12),
-        (5, 5, @trainerID1, DATEADD(day, 5, GETDATE()), 'Individual', 1, 1),
-        (6, 6, @trainerID2, DATEADD(day, 6, GETDATE()), 'Group', 15, 15),
-        (7, 7, @trainerID1, DATEADD(day, 7, GETDATE()), 'Group', 18, 18),
-        (8, 8, @trainerID2, DATEADD(day, 8, GETDATE()), 'Individual', 1, 1),
-        (9, 9, @trainerID1, DATEADD(day, 9, GETDATE()), 'Group', 25, 25),
-        (10, 10, @trainerID2, DATEADD(day, 10, GETDATE()), 'Group', 20, 20);
+    VALUES (@planID, @placeID, @trainerID, DATEADD(day, 2, GETDATE()), 'Group', 15, 20)
+    PRINT 'Error: Should not allow available_slots > max_capacity'
+END TRY
+BEGIN CATCH
+    PRINT 'Expected error caught: ' + ERROR_MESSAGE()
+END CATCH
+GO
+PRINT '6. Testing Memberships'
+DECLARE @result tinyint
+------------------------------------------------------------------------------------------------
+DECLARE @participantID INT
+SELECT TOP 1 @participantID = participantID FROM Participants
 
-    -- Add participants to trainings and create memberships
-    DECLARE @participantID INT;
-    SELECT TOP 1 @participantID = participantID FROM Participants ORDER BY participantID;
-	DECLARE @result tinyint
-    -- Add memberships for participants
-    --EXEC sp_Add_Membership @participantID, '1 month', '2024-12-27', 50.00, @result;
-    
-    -- Register participants for trainings
-    DECLARE @trainingID INT;
-    SELECT TOP 1 @trainingID = trainingID FROM Trainings ORDER BY trainingID;
-    
-    --EXEC sp_Add_Participant_To_Training @participantID, @trainingID, @result;
+-- test valid membership insertion
+EXEC sp_Add_Membership @participantID, '1 month', GETDATE, 50.00, @result
+PRINT 'Expected: Success (0), Actual: ' + CAST(@result AS VARCHAR)
 
-    -- Add reviews
+-- test invalid membership type
+EXEC sp_Add_Membership @participantID, 'invalid type', GETDATE, 50.00, @result
+PRINT 'Expected: Error (1 - Invalid type), Actual: ' + CAST(@result AS VARCHAR)
+
+PRINT '7. Testing Training Registration'
+------------------------------------------------------------------------------------------------
+DECLARE @trainingID INT
+SELECT TOP 1 @trainingID = trainingID FROM Trainings
+
+-- test valid registration
+EXEC sp_Add_Participant_To_Training @participantID, @trainingID, @result
+PRINT 'Expected: Success (0), Actual: ' + CAST(@result AS VARCHAR)
+
+-- test duplicate registration
+EXEC sp_Add_Participant_To_Training @participantID, @trainingID, @result
+PRINT 'Expected: Error (3 - Already registered), Actual: ' + CAST(@result AS VARCHAR)
+
+-- test registration without valid membership
+-- first, expire the membership
+UPDATE Memberships 
+SET validity_date = DATEADD(day, -1, GETDATE()) 
+WHERE participantID = @participantID
+
+SELECT TOP 1 @trainingID = trainingID 
+FROM Trainings 
+WHERE trainingID != @trainingID
+
+EXEC sp_Add_Participant_To_Training @participantID, @trainingID, @result
+PRINT 'Expected: Error (5 - No valid membership), Actual: ' + CAST(@result AS VARCHAR)
+
+PRINT '8. Testing Reviews'
+------------------------------------------------------------------------------------------------
+--test valid review
+INSERT INTO Reviews (trainingID, participantID, rating, comment)
+VALUES (@trainingID, @participantID, 5, 'Great training session!')
+PRINT 'Expected: Success'
+
+-- test invalid rating
+BEGIN TRY
     INSERT INTO Reviews (trainingID, participantID, rating, comment)
-    VALUES 
-        (@trainingID, @participantID, 5, 'Excellent training session!'),
-        (@trainingID, @participantID, 4, 'Great workout, very challenging'),
-        (@trainingID, @participantID, 5, 'Amazing instructor and facility'),
-        (@trainingID, @participantID, 4, 'Really enjoyed the class'),
-        (@trainingID, @participantID, 5, 'Best training session ever'),
-        (@trainingID, @participantID, 4, 'Very professional and motivating'),
-        (@trainingID, @participantID, 5, 'Will definitely come back'),
-        (@trainingID, @participantID, 4, 'Good energy and atmosphere'),
-        (@trainingID, @participantID, 5, 'Exceeded my expectations'),
-        (@trainingID, @participantID, 4, 'Well-structured training program');
+    VALUES (@trainingID, @participantID, 6, 'Invalid rating')
+    PRINT 'Error: Should not allow rating > 5'
+END TRY
+BEGIN CATCH
+    PRINT 'Expected error caught: ' + ERROR_MESSAGE()
+END CATCH
+
+PRINT '9. Testing Audit Logging'
+------------------------------------------------------------------------------------------------
+-- test participant update auditing
+UPDATE Participants
+SET phone_number = '999-999-9999'
+WHERE participantID = @participantID
+PRINT 'Expected: Audit log entry created'
+
+-- test training update auditing
+UPDATE Trainings
+SET available_slots = available_slots - 1
+WHERE trainingID = @trainingID
+PRINT 'Expected: Audit log entry created'
+
+-- verify audit logs
+SELECT TOP 5 * FROM AuditLog ORDER BY auditID DESC
+PRINT 'Verify above audit log entries'
+
+PRINT '10. Testing Login Validation'
+------------------------------------------------------------------------------------------------
+-- test valid login
+EXEC sp_Validate_Participant_OnLogIn 'john.doe@email.com', 'SecurePass123!', @result
+PRINT 'Expected: Success (0), Actual: ' + CAST(@result AS VARCHAR)
+
+-- test invalid email
+EXEC sp_Validate_Participant_OnLogIn 'nonexistent@email.com', 'SecurePass123!', @result
+PRINT 'Expected: Error (1 - User does not exist), Actual: ' + CAST(@result AS VARCHAR)
+
+-- test invalid password
+EXEC sp_Validate_Participant_OnLogIn 'john.doe@email.com', 'WrongPassword123!', @result
+PRINT 'Expected: Error (3 - Incorrect password), Actual: ' + CAST(@result AS VARCHAR)
+
+PRINT '11. Verify Data Through Views'
+------------------------------------------------------------------------------------------------
+-- check complete training schedule
+SELECT TOP 5 * FROM vw_CompleteTrainingSchedule
+PRINT 'Verify training schedule above'
+
+-- check participant membership status
+SELECT * FROM vw_ParticipantMembershipStatus
+WHERE participant_name LIKE 'John%'
+PRINT 'Verify membership status above'
+
+-- check training reviews
+SELECT * FROM vw_TrainingReviews
+WHERE reviewer_name LIKE 'John%'
+PRINT 'Verify reviews above'
+
+-- final data verification
+SELECT 'Participants' AS TableName, COUNT(*) AS RecordCount FROM Participants
+UNION ALL
+SELECT 'Trainers', COUNT(*) FROM Trainers
+UNION ALL
+SELECT 'Trainings', COUNT(*) FROM Trainings
+UNION ALL
+SELECT 'Memberships', COUNT(*) FROM Memberships
+UNION ALL
+SELECT 'Reviews', COUNT(*) FROM Reviews
+UNION ALL
+SELECT 'AuditLog', COUNT(*) FROM AuditLog
+ORDER BY TableName
+PRINT 'Verify final record counts above'
 GO
 
 
@@ -1510,7 +1638,7 @@ SELECT * FROM AuditLog
 SELECT * FROM Reviews
 
 GO
--- Now let's create some verification views
+
 CREATE OR ALTER VIEW vw_CompleteTrainingSchedule
 AS
 SELECT 
@@ -1566,7 +1694,7 @@ JOIN Places p ON t.placeID = p.placeID
 JOIN Participants part ON r.participantID = part.participantID;
 GO
 
--- Queries to verify the data
+-- verify the data
 SELECT 'Trainers' AS DataSet, COUNT(*) AS RecordCount FROM Trainers
 UNION ALL
 SELECT 'Participants', COUNT(*) FROM Participants
@@ -1581,11 +1709,11 @@ SELECT 'Reviews', COUNT(*) FROM Reviews
 UNION ALL
 SELECT 'Memberships', COUNT(*) FROM Memberships;
 
--- View the complete training schedule
+-- view the complete training schedule
 SELECT * FROM vw_CompleteTrainingSchedule;
 
--- View participant membership status
+-- view participant membership status
 SELECT * FROM vw_ParticipantMembershipStatus;
 
--- View training reviews
+-- view training reviews
 SELECT * FROM vw_TrainingReviews;
